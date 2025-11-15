@@ -1,40 +1,144 @@
 import streamlit as st
-from ai_meal_optimizer.utils import load_all_menus, find_meal, suggest_healthy, predict_top_3_gemini
+import os
+from utils import load_menus, search_meals, suggest_healthier, predict_meal_from_image
 
-st.set_page_config(page_title="AI Campus Meal Optimizer")
+# Page config
+st.set_page_config(page_title="AI Meal Optimizer", layout="wide")
 
-# ---------- Load Data ----------
-menu_df = load_all_menus()
+# Title
+st.title("🍽️ AI Meal Optimizer")
+st.markdown("Find healthier meal alternatives from your dining hall menus")
 
-# ---------- App Header ----------
-st.title("AI Campus Meal Optimizer")
-st.write("Search for meals or scan a photo to identify your meal!")
+# Load menus with caching
+@st.cache_data
+def get_menus():
+    return load_menus()
 
-# ---------- Search by Name ----------
-st.subheader("Search meals by name")
-query = st.text_input("Type your meal query:")
+menu_df = get_menus()
 
-if query:
-    results = find_meal(menu_df, query)
-    if not results.empty:
-        st.write("Top meal matches:")
-        st.table(results[["item_name", "calories", "protein", "carbs", "fat"]])
+# Display data load status
+if menu_df.empty:
+    st.error("⚠️ No menu data found. Make sure CSV files are in the same directory as the app.")
+else:
+    st.success(f"✅ Loaded {len(menu_df)} items from dining halls")
+
+# Sidebar
+st.sidebar.header("🔍 Meal Options")
+search_query = st.sidebar.text_input("Search for a meal:", placeholder="e.g., scrambled eggs")
+upload_image = st.sidebar.file_uploader(
+    "Or upload an image of your meal", 
+    type=["jpg", "png", "jpeg"]
+)
+
+# Main app logic
+if search_query:
+    st.subheader(f"🔎 Results for '{search_query}'")
+    
+    results = search_meals(menu_df, search_query)
+    
+    if results:
+        # Display search results
+        for i, r in enumerate(results, 1):
+            # r keys: item_name, calories, hall
+            st.write(
+                f"**{i}. {r['item_name']}** — {r['calories']} cal — 📍 {r['hall']}"
+            )
+        
+        # Show healthier alternatives for top result
+        st.divider()
+        st.subheader("💚 Healthier Alternatives")
+        
+        # Use item_name here (not meal_name)
+        target_name = results[0]['item_name']
+        healthier = suggest_healthier(menu_df, target_name)
+        
+        if healthier:
+            for i, h in enumerate(healthier, 1):
+                calories_saved = results[0]['calories'] - h['calories']
+                st.write(
+                    f"**{i}. {h['item_name']}** — {h['calories']} cal — 📍 {h['hall']} "
+                    f"*(Save {calories_saved} calories)*"
+                )
+        else:
+            st.info("No lower-calorie alternatives found for this meal.")
     else:
-        st.write("No matching meals found.")
+        st.warning(f"No results found for '{search_query}'. Try a different search term.")
 
-# ---------- Scan Meal Image ----------
-st.subheader("Scan your meal")
-image_file = st.file_uploader("Upload a photo of your meal", type=["png", "jpg", "jpeg"])
+elif upload_image:
+    st.subheader("📸 Analyzing your meal...")
+    
+    # Save uploaded image temporarily
+    temp_path = "temp_image.jpg"
+    with open(temp_path, "wb") as f:
+        f.write(upload_image.getbuffer())
+    
+    # Display the uploaded image
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.image(upload_image, caption="Uploaded Image", use_container_width=True)
+    
+    with col2:
+        # Get predictions from Gemini
+        with st.spinner("Identifying meal..."):
+            predictions = predict_meal_from_image(temp_path)
+        
+        if predictions:
+            st.success("✅ Meal identified!")
+            for p in predictions:
+                st.write(f"**Detected:** {p['label']} (Confidence: {p['confidence']*100:.0f}%)")
+            
+            # Suggest healthier alternatives
+            st.divider()
+            st.subheader("💚 Healthier Alternatives")
+            
+            healthier = suggest_healthier(menu_df, predictions[0]['label'])
+            
+            if healthier:
+                for i, h in enumerate(healthier, 1):
+                    st.write(
+                        f"**{i}. {h['item_name']}** — {h['calories']} cal — 📍 {h['hall']}"
+                    )
+            else:
+                st.info(
+                    f"No exact match found for '{predictions[0]['label']}' in our menu database. "
+                    "Try searching manually or upload a clearer image."
+                )
+        else:
+            st.error("❌ Could not identify the meal. Make sure GEMINI_API_KEY is set, or try a clearer image.")
+    
+    # Clean up temp file
+    try:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    except:
+        pass
 
-if image_file:
-    menu_list = menu_df["item_name"].tolist()
-    top_suggestions = predict_top_3_gemini(image_file, menu_list)
-    st.write("Top AI predictions for your meal:")
-    st.write(top_suggestions)
+else:
+    # Welcome screen
+    st.info("👈 **Get started:** Search for a meal or upload an image in the sidebar!")
+    
+    st.markdown("""
+    ### How it works:
+    1. **Search by name**: Type a meal name (e.g., "scrambled eggs") to see nutrition info
+    2. **Upload an image**: Take a photo of your meal and let AI identify it
+    3. **Get alternatives**: Discover healthier options with fewer calories
+    
+    ### Features:
+    - 🔍 Search across multiple dining halls
+    - 📊 Compare calorie counts instantly
+    - 🤖 AI-powered image recognition (requires GEMINI_API_KEY)
+    - 💡 Smart recommendations for healthier choices
+    """)
+    
+    # Show sample of available meals
+    if not menu_df.empty:
+        st.divider()
+        st.subheader("📋 Sample Menu Items")
 
-    healthy_suggestions = suggest_healthy(menu_df)
-    st.write("Healthy suggestions:")
-    st.write(healthy_suggestions)
+        # Use the actual column names in menu_df
+        base_cols = ['item_name', 'calories', 'hall']
+        extra_cols = [c for c in ['meal'] if c in menu_df.columns]
+        cols = base_cols + extra_cols
 
-
-
+        sample = menu_df.sample(min(10, len(menu_df)))[cols]
+        st.dataframe(sample, use_container_width=True, hide_index=True)
